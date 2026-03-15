@@ -6,10 +6,10 @@ import { ConfigService } from '@nestjs/config';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
-  const logger = app.get(Logger);
-  // app.setGlobalPrefix('api');
+  const logger = new Logger('Bootstrap');
+  app.setGlobalPrefix('api');
   const origin =
-    configService.get<string>('FRONTEND_ORIGIN') || 'http://localhost:3000';
+    configService.get<string>('CORS_ORIGINS') || 'http://localhost:3001';
   logger.log(`CORS Origin set to: ${origin}`);
   app.enableCors({ origin });
   app.useGlobalPipes(
@@ -20,7 +20,7 @@ async function bootstrap() {
     }),
   );
   app.enableShutdownHooks();
-  const port = configService.get<number>('PORT') || 8000;
+  const port = configService.get<number>('PORT') || 8001;
   await app.listen(port);
   logger.log(`Application is running on: http://localhost:${port}`);
 }
