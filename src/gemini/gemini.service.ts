@@ -102,19 +102,33 @@ Begin the story now:
     // let fullText = '';
 
     for await (const chunk of await streamResult) {
-      const chunkText = chunk.text ?? '';
-      //   fullText += chunkText;
+      // const chunkText = chunk.text ?? '';
+      // //   fullText += chunkText;
+      // pageTextBuffer += chunkText;
+
+      // // Check if we've accumulated a complete page
+      // // A page ends when we find a [IMAGE: ...] directive
+      // const imageMatch = IMAGE_DIRECTIVE_RE.exec(pageTextBuffer);
+
+      // if (imageMatch) {
+      //   pageNumber++;
+      //   const imagePrompt = imageMatch[1].trim();
+
+      //   // Extract just the narrative text (before the [IMAGE:] tag)
+      //   const narrativeText = pageTextBuffer
+      //     .slice(0, imageMatch.index)
+      //     .trim()
+      //     .replace(/\n{3,}/g, '\n\n');
+      // In @google/genai SDK, extract text from the first candidate's parts
+      const candidate = chunk.candidates?.[0];
+      const chunkText =
+        candidate?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
       pageTextBuffer += chunkText;
 
-      // Check if we've accumulated a complete page
-      // A page ends when we find a [IMAGE: ...] directive
       const imageMatch = IMAGE_DIRECTIVE_RE.exec(pageTextBuffer);
-
       if (imageMatch) {
         pageNumber++;
         const imagePrompt = imageMatch[1].trim();
-
-        // Extract just the narrative text (before the [IMAGE:] tag)
         const narrativeText = pageTextBuffer
           .slice(0, imageMatch.index)
           .trim()
