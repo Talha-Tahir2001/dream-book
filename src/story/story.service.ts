@@ -1,9 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Observable, Subject } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
-import { ConfigService } from '@nestjs/config';
 import { GeminiService } from '../gemini/gemini.service';
-import { ImagenService } from '../gemini/imagen.service';
 import { TtsService } from '../gemini/tts.service';
 import { PdfService } from '../pdf/pdf.service';
 import { FirestoreService } from './firestore.service';
@@ -16,37 +14,33 @@ import {
   PageTextPayload,
   PageImagePayload,
 } from '../shared/schemas';
+import { ConfigService } from '@nestjs/config';
+import { ImagenService } from 'src/gemini/imagen.service';
 
 @Injectable()
 export class StoryService {
   private readonly logger = new Logger(StoryService.name);
   private readonly isLocalDev: boolean;
-  // Prevent duplicate pipelines — tracks in-flight storyIds
   private readonly activePipelines = new Set<string>();
-
   constructor(
-    private readonly config: ConfigService,
     private readonly gemini: GeminiService,
-    private readonly imagen: ImagenService,
     private readonly tts: TtsService,
     private readonly pdf: PdfService,
     private readonly firestore: FirestoreService,
     private readonly cloudTasks: CloudTasksService,
+    private readonly imagen: ImagenService,
+    private readonly config: ConfigService,
   ) {
-    // ILLUSTRATION_MODE=direct  → call Nano Banana directly (default, works everywhere)
-    // ILLUSTRATION_MODE=tasks   → use Cloud Tasks queue (production at scale)
-    // Falls back to direct mode if Cloud Tasks vars are missing.
-    const mode = this.config.get<string>('ILLUSTRATION_MODE', 'direct');
-    const cloudTasksReady = Boolean(
-      this.config.get('CLOUD_TASKS_QUEUE') &&
-      this.config.get('CLOUD_TASKS_HANDLER_URL'),
-    );
-    this.isLocalDev = mode !== 'tasks' || !cloudTasksReady;
+    this.isLocalDev =
+      this.config.get('NODE_ENV', 'development') !== 'production';
     this.logger.log(
-      `Illustration mode: ${this.isLocalDev ? 'DIRECT (Nano Banana)' : 'CLOUD TASKS'}`,
+      `Illustration mode: ${this.isLocalDev ? 'DIRECT (local dev)' : 'CLOUD TASKS (production)'}`,
     );
   }
 
+  // ──────────────────────────────────────────────────────────
+  //  Create a new story record in Firestore
+  // ──────────────────────────────────────────────────────────
   async create(userId: string, request: StoryRequest): Promise<Story> {
     const story: Story = {
       id: uuidv4(),
@@ -60,6 +54,18 @@ export class StoryService {
     await this.firestore.saveStory(story);
     return story;
   }
+
+  // ──────────────────────────────────────────────────────────
+  //  Core: stream story generation
+  //
+  //  Flow:
+  //  1. Gemini streams interleaved text + image prompts
+  //  2. For each page:
+  //     a. Persist text to Firestore → emit page:text
+  //     b. Dispatch Cloud Tasks job for Imagen → emit page:image (pending)
+  //     c. Kick off TTS concurrently → emit page:audio when done
+  //  3. When all pages complete → generate PDF → emit story:complete
+  // ──────────────────────────────────────────────────────────
 
   generateStream(storyId: string, request: StoryRequest): Observable<SseEvent> {
     const output = new Subject<SseEvent>();
@@ -102,11 +108,10 @@ export class StoryService {
     const pages: StoryPage[] = [];
     const ttsPromises: Promise<void>[] = [];
 
-    // ── In local dev: run illustration jobs directly, in parallel ──
-    // Nano Banana handles concurrent requests well — no stagger needed.
     const illustrationPromises: Promise<void>[] = [];
-    // let illustrationIndex = 0; // kept for potential future stagger if needed
+    let illustrationIndex = 0;
 
+    // Subscribe to Gemini interleaved stream
     const geminiStream = this.gemini.streamStory(storyId, request);
 
     await new Promise<void>((resolve, reject) => {
@@ -117,12 +122,40 @@ export class StoryService {
               if (event.event === 'page:text') {
                 const { pageNumber, text } = event.data as PageTextPayload;
 
-                const page: StoryPage = { pageNumber, text, imagePrompt: '' };
+                // Save page stub to Firestore
+                const page: StoryPage = {
+                  pageNumber,
+                  text,
+                  imagePrompt: '',
+                };
                 pages.push(page);
                 await this.firestore.upsertPage(storyId, page);
+
+                // Forward to SSE
                 output.next(event);
 
-                // TTS — fire and forget, emit when done
+                // Start TTS concurrently
+                // const ttsJob = this.tts
+                //   .generateAndUpload(
+                //     text,
+                //     storyId,
+                //     pageNumber,
+                //     request.language,
+                //   )
+                //   .then(async (audioUrl) => {
+                //     page.audioUrl = audioUrl;
+                //     await this.firestore.upsertPage(storyId, page);
+                //     output.next({
+                //       event: 'page:audio',
+                //       data: { storyId, pageNumber, audioUrl },
+                //     });
+                //   })
+                //   .catch((err: Error) => {
+                //     this.logger.warn(
+                //       `TTS failed for page ${pageNumber}: ${err.message}`,
+                //     );
+                //   });
+                // ttsPromises.push(ttsJob);
                 ttsPromises.push(
                   this.tts
                     .generateAndUpload(
@@ -139,12 +172,11 @@ export class StoryService {
                         data: { storyId, pageNumber, audioUrl },
                       });
                     })
-                    .catch((err: Error) => {
-                      this.logger.error(
+                    .catch((err: Error) =>
+                      this.logger.warn(
                         `TTS failed p${pageNumber}: ${err.message}`,
-                      );
-                      this.logger.error(`TTS error stack: ${err.stack}`);
-                    }),
+                      ),
+                    ),
                 );
               }
 
@@ -152,22 +184,38 @@ export class StoryService {
                 const { pageNumber, imagePrompt } =
                   event.data as PageImagePayload;
 
+                // Update image prompt in Firestore
                 const page = pages.find((p) => p.pageNumber === pageNumber);
                 if (page) {
                   page.imagePrompt = imagePrompt;
                   await this.firestore.upsertPage(storyId, page);
                 }
 
+                // Dispatch Cloud Tasks job for Imagen (async)
+
+                // await this.cloudTasks.dispatchIllustrationJob({
+                //   storyId,
+                //   pageNumber,
+                //   imagePrompt,
+                //   illustrationStyle: request.illustrationStyle,
+                // });
+
+                // Note: page:image with the actual URL will be emitted
+                // by InternalController when Cloud Tasks job completes
+
                 if (this.isLocalDev) {
-                  // ── Local: call Nano Banana directly, in parallel ──
-                  // illustrationIndex++;
+                  // ── Local: call Imagen directly, staggered to avoid rate limits ──
+                  const delayMs = illustrationIndex * 3000; // 3s between each call
+                  illustrationIndex++;
                   illustrationPromises.push(
-                    this.imagen
-                      .generateAndUpload(
-                        imagePrompt,
-                        storyId,
-                        pageNumber,
-                        request.illustrationStyle,
+                    new Promise<void>((res) => setTimeout(res, delayMs))
+                      .then(() =>
+                        this.imagen.generateAndUpload(
+                          imagePrompt,
+                          storyId,
+                          pageNumber,
+                          request.illustrationStyle,
+                        ),
                       )
                       .then(async (imageUrl) => {
                         if (page) page.imageUrl = imageUrl;
@@ -199,24 +247,36 @@ export class StoryService {
                 }
               }
 
-              if (event.event === 'story:complete') resolve();
+              if (event.event === 'story:complete') {
+                resolve();
+              }
+
               if (event.event === 'story:error') {
                 reject(new Error((event.data as { message: string }).message));
               }
             } catch (err) {
               reject(err instanceof Error ? err : new Error(String(err)));
             }
-          });
+          })();
         },
         error: reject,
       });
     });
 
+    // Wait for all TTS jobs to finish
     await this.firestore.updateStatus(storyId, 'illustrating');
-
-    // Wait for all TTS + (in local dev) all illustrations
     await Promise.allSettled([...ttsPromises, ...illustrationPromises]);
 
+    // Generate PDF (pages will have text + imageUrl when illustrations done)
+    // PDF generation happens in InternalController after all images are ready
+    // Here we just mark complete
+    // await this.firestore.updateStatus(storyId, 'complete');
+
+    // output.next({
+    //   event: 'story:complete',
+    //   data: { storyId, pageCount: pages.length },
+    // });
+    // output.complete();
     // Generate PDF once everything is ready
     try {
       const story = await this.firestore.getStory(storyId);
@@ -241,7 +301,9 @@ export class StoryService {
     output.complete();
   }
 
-  // Called by InternalController (Cloud Tasks webhook — production only)
+  // ──────────────────────────────────────────────────────────
+  //  Called by InternalController after an illustration job completes
+  // ──────────────────────────────────────────────────────────
   async onIllustrationComplete(
     storyId: string,
     pageNumber: number,
@@ -249,11 +311,11 @@ export class StoryService {
   ): Promise<void> {
     await this.firestore.updatePageImage(storyId, pageNumber, imageUrl);
 
+    // Check if all pages now have images → generate PDF
     const story = await this.firestore.getStory(storyId);
     if (!story) return;
 
-    const allIllustrated =
-      story.pages.length > 0 && story.pages.every((p) => p.imageUrl);
+    const allIllustrated = story.pages.every((p) => p.imageUrl);
     if (allIllustrated) {
       this.logger.log(`All pages illustrated for ${storyId} — generating PDF`);
       try {
