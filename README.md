@@ -22,78 +22,548 @@
   <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
   [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
 
-## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+# DreamBook API 📖
 
-## Project setup
+> **NestJS backend for DreamBook** — an AI-powered personalized children's storybook generator.
+> Built for the **Gemini Live Agent Hackathon 2026** (Creative Storyteller category).
+>
+> 🏆 **Live Demo:** https://dream-book-web.vercel.app
+> 🚀 **API Base URL:** https://dream-book-api-780143515127.us-central1.run.app 
 
-```bash
-$ npm install
+---
+
+## What is DreamBook?
+
+A parent describes their child — name, age, interests, fears, a lesson to teach — either by typing or speaking naturally via voice. DreamBook generates a fully illustrated, narrated, personalized storybook in real time. Text streams in page by page, illustrations appear as they're generated, and audio narration is ready to play for each page. The completed story exports as a beautiful PDF storybook.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Framework | NestJS 10 + TypeScript |
+| Story Generation | Gemini 3.1 Pro Preview (interleaved streaming) |
+| Image Generation | Nano Banana (`gemini-3.1-flash-image-preview`) |
+| Text-to-Speech | `gemini-2.5-flash-preview-tts` via `generateContent` |
+| Voice Input | Gemini Live API (`gemini-2.5-flash-native-audio-preview`) |
+| AI SDK | `@google/genai` (official TypeScript SDK) |
+| Auth | Firebase Admin SDK (JWT verification) |
+| Database | Firestore (NoSQL) |
+| File Storage | Google Cloud Storage (GCS) with signed URLs |
+| Hosting | Google Cloud Run (containerized, auto-scaling) |
+| CI/CD | Cloud Build (GitHub → Cloud Run on push to main) |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         CLIENT (Next.js)                        │
+│  Voice Input → Socket.io WS    Story Stream ← SSE (fetch)      │
+└────────────────┬────────────────────────────────┬──────────────┘
+                 │ WebSocket /voice                │ GET /stream
+                 ▼                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    NESTJS API  (Cloud Run)                      │
+│                                                                 │
+│  VoiceGateway          StoryController      FirebaseAuthGuard  │
+│  └─ Gemini Live API    └─ SSE streaming     └─ JWT validation  │
+│     (transcription)       (Observable)                         │
+│                                                                 │
+│  StoryService (pipeline orchestrator)                          │
+│  ├─ GeminiService    → streams text + [IMAGE:] directives      │
+│  ├─ ImagenService    → Nano Banana illustrations               │
+│  ├─ TtsService       → audio narration per page               │
+│  ├─ PdfService       → assembled storybook PDF                │
+│  └─ FirestoreService → story persistence                      │
+└────────┬──────────────────────┬───────────────────────────────┘
+         │                      │
+         ▼                      ▼
+┌────────────────┐   ┌──────────────────────────────────────────┐
+│   Firestore    │   │          Google Cloud Services           │
+│  (stories DB)  │   │  ┌─────────────┐  ┌───────────────────┐ │
+└────────────────┘   │  │ Cloud Storage│  │    Vertex AI /    │ │
+                     │  │ (images,     │  │  Gemini API       │ │
+                     │  │  audio, PDF) │  │  (all AI calls)   │ │
+                     │  └─────────────┘  └───────────────────┘ │
+                     └──────────────────────────────────────────┘
 ```
 
-## Compile and run the project
 
-```bash
-# development
-$ npm run start
 
-# watch mode
-$ npm run start:dev
 
-# production mode
-$ npm run start:prod
+---
+
+## API Reference
+
+### Authentication
+
+All endpoints except `/api/health` require a Firebase ID token:
+
+```
+Authorization: Bearer <firebase-id-token>
 ```
 
-## Run tests
+---
 
-```bash
-# unit tests
-$ npm run test
+### Endpoints
 
-# e2e tests
-$ npm run test:e2e
+#### `GET /api/health`
+Health check — no auth required.
 
-# test coverage
-$ npm run test:cov
+**Response:**
+```json
+{ "status": "ok", "timestamp": "2026-03-16T11:21:11.522Z" }
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+#### `POST /api/stories`
+Create a story record. Returns `storyId` immediately — then open the SSE stream.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g mau
-$ mau deploy
+**Request body:**
+```json
+{
+  "childName": "Emma",
+  "childAge": 5,
+  "interests": ["dinosaurs", "painting"],
+  "lesson": "Being brave means doing it even when you're scared",
+  "fears": ["the dark"],
+  "pageCount": 8,
+  "illustrationStyle": "watercolor",
+  "language": "en"
+}
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `childName` | string | ✅ | Child's first name |
+| `childAge` | number (1–12) | ✅ | Child's age |
+| `interests` | string[] (1–5) | ✅ | What the child loves |
+| `lesson` | string | ❌ | Moral or lesson for the story |
+| `fears` | string[] | ❌ | Fears to gently address |
+| `pageCount` | number (4–12) | ✅ | Story length |
+| `illustrationStyle` | `watercolor` \| `cartoon` \| `pencil-sketch` \| `digital-art` | ✅ | Art style |
+| `language` | string | ✅ | ISO language code (e.g. `en`, `es`, `fr`) |
 
-## Resources
+**Response `201`:**
+```json
+{ "storyId": "uuid-here" }
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+---
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+#### `GET /api/stories/:id/stream`
+SSE stream — connects and receives events as the story generates.
 
-## Support
+**Response:** `text/event-stream`
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+Events emitted in order:
 
-## Stay in touch
+```
+event: page:text
+data: {"storyId":"...","pageNumber":1,"text":"Once upon a time..."}
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+event: page:image
+data: {"storyId":"...","pageNumber":1,"imageUrl":"https://storage.googleapis.com/..."}
+
+event: page:audio
+data: {"storyId":"...","pageNumber":1,"audioUrl":"https://storage.googleapis.com/..."}
+
+event: story:complete
+data: {"storyId":"...","pageCount":8,"pdfUrl":"https://storage.googleapis.com/..."}
+
+event: story:error
+data: {"storyId":"...","message":"..."}
+```
+
+---
+
+#### `GET /api/stories`
+List all stories for the authenticated user.
+
+**Response:**
+```json
+{
+  "stories": [
+    {
+      "id": "uuid",
+      "userId": "firebase-uid",
+      "status": "complete",
+      "pages": [...],
+      "pdfUrl": "https://...",
+      "createdAt": 1773661486000,
+      "request": { "childName": "Emma", ... }
+    }
+  ]
+}
+```
+
+---
+
+#### `GET /api/stories/:id`
+Fetch a single story with all page data.
+
+---
+
+#### `DELETE /api/stories/:id`
+Delete a story. Returns `204 No Content`.
+
+---
+
+### WebSocket — Voice Input
+
+**Namespace:** `/voice`
+**Transport:** Socket.io over WebSocket
+
+**Connection:**
+```javascript
+const socket = io('wss://https://dream-book-api-780143515127.us-central1.run.app.run.app/voice', {
+  auth: { token: firebaseIdToken },
+  transports: ['websocket']
+});
+```
+
+**Client → Server events:**
+
+| Event | Payload | Description |
+|---|---|---|
+| `voice:start` | — | Opens a Gemini Live session |
+| `voice:audio` | `{ audioChunk: string }` | Base64 PCM 16kHz audio chunk |
+| `voice:stop` | — | Closes session, extracts `StoryRequest` |
+
+**Server → Client events:**
+
+| Event | Payload | Description |
+|---|---|---|
+| `voice:transcript` | `{ text, isFinal }` | Live transcription as user speaks |
+| `voice:result` | `{ storyRequest }` | Extracted `StoryRequest` JSON |
+| `voice:error` | `{ message }` | Error description |
+
+---
+
+## Story Generation Pipeline
+
+```
+POST /api/stories          → creates Firestore record, returns storyId
+GET  /api/stories/:id/stream → opens SSE connection
+
+Pipeline (runs server-side):
+  1. GeminiService.streamStory()
+     └─ streams text + [IMAGE: prompt] directives
+     └─ emits page:text events → forwarded to SSE immediately
+
+  2. Per page (concurrent):
+     ├─ TtsService.generateAndUpload()
+     │   └─ gemini-2.5-flash-preview-tts → PCM → WAV → GCS
+     │   └─ emits page:audio event when ready
+     │
+     └─ ImagenService.generateAndUpload()
+         └─ gemini-3.1-flash-image-preview (Nano Banana) → PNG → GCS
+         └─ emits page:image event when ready
+
+  3. After all pages done:
+     └─ PdfService.generate()
+         └─ pdf-lib assembles landscape PDF (illustration left, text right)
+         └─ uploads to GCS
+         └─ emits story:complete with pdfUrl
+```
+
+---
+
+## Local Development
+
+### Prerequisites
+
+- Node.js 20+
+- `gcloud` CLI authenticated (`gcloud auth application-default login`)
+- Firebase project created
+- GCP project with APIs enabled
+
+### Setup
+
+```bash
+# 1. Clone
+git clone https://github.com/Talha-Tahir2001/dream-book
+cd dream-book-api
+
+# 2. Install dependencies
+npm install
+
+# 3. Configure environment
+cp .env.example .env
+# Fill in all values (see Environment Variables section below)
+
+# 4. Start dev server
+npm run start:dev
+# API available at http://localhost:8000
+```
+
+### Enable GCP APIs
+
+```bash
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  aiplatform.googleapis.com \
+  storage.googleapis.com \
+  firestore.googleapis.com \
+  cloudtasks.googleapis.com \
+  iamcredentials.googleapis.com
+```
+
+### Create GCS Bucket
+
+```bash
+gsutil mb -p YOUR_PROJECT_ID -l us-central1 gs://your-bucket-name
+```
+
+---
+
+## Environment Variables
+
+### Local `.env`
+
+```bash
+# ── Google Cloud ─────────────────────────────────────────────
+GCP_PROJECT_ID=your-project-id
+GCP_REGION=us-central1
+
+# ── Gemini ───────────────────────────────────────────────────
+GEMINI_API_KEY=AIzaSy...
+GEMINI_MODEL=gemini-3.1-pro-preview
+
+# ── Firebase ─────────────────────────────────────────────────
+GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
+FIREBASE_PROJECT_ID=your-project-id
+
+# ── Cloud Storage ────────────────────────────────────────────
+GCS_BUCKET_NAME=your-bucket-name
+GCS_SIGNED_URL_EXPIRY_MINUTES=60
+
+# ── Illustration Mode ────────────────────────────────────────
+# "direct" = call Nano Banana directly (local dev + Cloud Run)
+# "tasks"  = use Cloud Tasks queue (only if configured)
+ILLUSTRATION_MODE=direct
+
+# ── App ──────────────────────────────────────────────────────
+PORT=8000
+NODE_ENV=development
+CORS_ORIGINS=http://localhost:3000
+
+# ── Internal Security ────────────────────────────────────────
+INTERNAL_SECRET=your-random-secret
+```
+
+### Where to get each value
+
+| Variable | Source |
+|---|---|
+| `GCP_PROJECT_ID` | GCP Console → project selector, or `gcloud projects list` |
+| `GEMINI_API_KEY` | https://aistudio.google.com → Get API Key or Google Vertex AI |
+| `FIREBASE_PROJECT_ID` | Firebase Console → Project Settings |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to downloaded service account JSON |
+| `GCS_BUCKET_NAME` | Name chosen when running `gsutil mb` |
+| `INTERNAL_SECRET` | Any random string you generate |
+
+---
+
+## Cloud Run Deployment
+
+### IAM Permissions (required)
+
+```bash
+SA="YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com"
+PROJECT="your-project-id"
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA" --role="roles/datastore.user"
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA" --role="roles/aiplatform.user"
+
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
+
+# Required for GCS signed URLs
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:$SA" --role="roles/iam.serviceAccountTokenCreator"
+```
+
+### Cloud Run Environment Variables
+
+Set these in **Cloud Run → Edit & Deploy New Revision → Variables**:
+
+```
+NODE_ENV                = production
+GCP_PROJECT_ID          = your-project-id
+GCP_REGION              = us-central1
+GEMINI_API_KEY          = AIzaSy...
+GEMINI_MODEL            = gemini-3.1-pro-preview
+FIREBASE_PROJECT_ID     = your-project-id
+GCS_BUCKET_NAME         = your-bucket-name
+INTERNAL_SECRET         = your-random-secret
+ILLUSTRATION_MODE       = direct
+CORS_ORIGINS            = https://your-nextjs-app.vercel.app
+GCS_SIGNED_URL_EXPIRY_MINUTES = 60
+```
+
+### Cloud Run Settings
+
+| Setting | Value | Reason |
+|---|---|---|
+| Memory | 2 GiB | Concurrent TTS + Imagen + PDF generation |
+| CPU | 2 | Parallel processing per story |
+| Request timeout | 3600s | SSE stream stays open during full generation |
+| Min instances | 0 | Scale to zero when idle (cost saving) |
+| Max instances | 10 | Enough for demo traffic |
+| Execution environment | 2nd gen | Better network performance for streaming |
+| Session affinity | Enabled | Required for WebSocket voice sessions |
+| Authentication | Allow unauthenticated | Frontend calls API from browser |
+
+### Enable session affinity (WebSocket support)
+
+```bash
+gcloud run services update your-api \
+  --region=us-central1 \
+  --session-affinity \
+  --timeout=3600
+```
+
+### CI/CD — Continuous Deployment
+
+This repo uses **Cloud Build** triggered by GitHub pushes to `main`. No manual deployment needed after initial setup.
+
+Every `git push origin main` automatically:
+1. Cloud Build pulls the repo
+2. Builds the Docker image from `Dockerfile`
+3. Pushes image to Artifact Registry
+4. Deploys new revision to Cloud Run
+
+---
+
+## Project Structure
+
+```
+src/
+├── main.ts                        ← App entry point
+├── app.module.ts                  ← Root module
+│
+├── shared/
+│   └── schemas.ts                 ← Zod schemas + TypeScript types
+│                                    (copy to Next.js frontend too)
+│
+├── firebase/
+│   ├── firebase.module.ts
+│   ├── firebase.service.ts        ← Admin SDK initialization
+│   └── firebase-auth.guard.ts     ← JWT verification on all routes
+│
+├── gemini/
+│   ├── gemini.module.ts
+│   ├── gemini.service.ts          ← Story text streaming (Gemini 3.1 Pro)
+│   ├── imagen.service.ts          ← Illustrations (Nano Banana)
+│   ├── tts.service.ts             ← Audio narration (TTS model)
+│   └── voice.gateway.ts           ← WebSocket + Gemini Live API
+│
+├── gcs/
+│   ├── gcs.module.ts
+│   └── gcs.service.ts             ← Upload assets + generate signed URLs
+│
+├── story/
+│   ├── story.module.ts
+│   ├── story.controller.ts        ← REST endpoints + SSE stream
+│   ├── story.service.ts           ← Pipeline orchestrator
+│   ├── firestore.service.ts       ← All Firestore operations
+│   └── cloud-tasks.service.ts     ← Cloud Tasks dispatcher (production)
+│
+├── pdf/
+│   ├── pdf.module.ts
+│   └── pdf.service.ts             ← Assemble landscape PDF storybook
+│
+├── internal/
+│   ├── internal.module.ts
+│   └── internal.controller.ts     ← Cloud Tasks webhook handler
+│
+└── health/
+    ├── health.module.ts
+    └── health.controller.ts       ← GET /api/health
+```
+
+---
+
+
+
+## Testing with Postman
+
+### 1. Get a Firebase token
+
+```bash
+npx ts-node get-test-token.ts
+```
+
+### 2. Health check (no auth)
+```
+GET https://dream-book-api-780143515127.us-central1.run.app/api/health
+```
+
+### 3. List stories
+```
+GET https://dream-book-api-780143515127.us-central1.run.app/api/stories
+Authorization: Bearer <token>
+```
+
+### 4. Create a story
+```
+POST https://dream-book-api-780143515127.us-central1.run.app/api/stories
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "childName": "Emma",
+  "childAge": 5,
+  "interests": ["dinosaurs"],
+  "pageCount": 4,
+  "illustrationStyle": "watercolor",
+  "language": "en"
+}
+```
+
+### 5. Stream a story (use curl)
+```bash
+curl -N \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  https://dream-book-api-780143515127.us-central1.run.app/api/stories/YOUR_STORY_ID/stream
+```
+
+---
+
+## Hackathon Submission Notes
+
+**Category:** Creative Storyteller ✍️ — Multimodal Storytelling with Interleaved Output
+
+**Mandatory tech used:**
+- ✅ Gemini's interleaved/mixed output — `gemini-3.1-pro-preview` streams text and image prompts in one output
+- ✅ Google Cloud hosted — deployed on Cloud Run
+- ✅ `@google/genai` SDK — used throughout (Gemini, Nano Banana, TTS, Live API)
+- ✅ Gemini Live API — voice input uses `gemini-2.5-flash-native-audio-preview` for real-time transcription
+
+**GCP Services used:**
+- Cloud Run — backend hosting
+- Cloud Build — CI/CD from GitHub
+- Firestore — story persistence
+- Cloud Storage — images, audio, PDFs
+- Secret Manager — credential management
+- Artifact Registry — Docker image storage
+
+---
 
 ## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+This project is licensed under the MIT License. See the [LICENSE](https://github.com/Talha-Tahir2001/dream-book?tab=MIT-1-ov-file) file for details.
