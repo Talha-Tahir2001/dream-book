@@ -19,9 +19,10 @@ export class FirebaseService implements OnModuleInit {
     // via the service account attached to the Cloud Run service.
     // Locally, point GOOGLE_APPLICATION_CREDENTIALS to your service-account.json.
     this._app = admin.initializeApp({
-      credential: admin.credential.cert(
-        this.config.getOrThrow<string>('GOOGLE_APPLICATION_CREDENTIALS'),
-      ),
+      // credential: admin.credential.cert(
+      //   this.config.getOrThrow<string>('GOOGLE_APPLICATION_CREDENTIALS'),
+      // ),
+      credential: admin.credential.applicationDefault(),
       projectId: this.config.get<string>('FIREBASE_PROJECT_ID'),
     });
 
