@@ -95,6 +95,11 @@ A parent describes their child — name, age, interests, fears, a lesson to teac
 
 
 
+## High Level Design
+![DreamBook Architecture](./docs/dreambook_architecture.svg)
+
+
+
 ---
 
 ## API Reference
